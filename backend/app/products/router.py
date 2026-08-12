@@ -1,9 +1,12 @@
 import uuid
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
+from app.core.storage import storage_service
 from app.products.models import (
     Category,
     Product,
@@ -428,3 +431,176 @@ def get_product_sources(
         )
 
     return product.sources
+
+
+@router.post(
+    "/products/{product_id}/images/upload",
+    response_model=ProductImageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_product_image(
+    product_id: uuid.UUID,
+    file: UploadFile = File(...),
+    image_type: str = Form(...),
+    source_type: str = Form(...),
+    db: Session = Depends(get_db),
+) -> ProductImage:
+    """
+    Upload a product image, validate it, save it locally, and create metadata.
+    """
+    # 1. Verify product exists
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found.",
+        )
+
+    # 2. Validate ImageType enum
+    try:
+        img_type = ImageType(image_type.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid image type '{image_type}'.",
+        )
+
+    # 3. Validate SourceType enum
+    try:
+        src_type = SourceType(source_type.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid source type '{source_type}'.",
+        )
+
+    # 4. Validate MIME Type
+    mime_type = file.content_type
+    if mime_type not in ("image/jpeg", "image/png", "image/webp"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported MIME type '{mime_type}'. Supported types: image/jpeg, image/png, image/webp.",
+        )
+
+    # 5. Read file contents and validate file size
+    contents = file.file.read()
+    file_size = len(contents)
+    if file_size > settings.MAX_IMAGE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File size exceeds the limit of {settings.MAX_IMAGE_SIZE_BYTES} bytes.",
+        )
+    if file_size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File cannot be empty.",
+        )
+
+    # 6. Verify image content using Pillow
+    import io
+    from PIL import Image, UnidentifiedImageError
+    try:
+        img = Image.open(io.BytesIO(contents))
+        img.verify()  # Verifies image is not corrupt
+        
+        # Re-open because verify() closes the file pointer in PIL
+        img = Image.open(io.BytesIO(contents))
+        width, height = img.size
+        img_format = img.format
+    except UnidentifiedImageError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is not a valid image.",
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Error processing image.",
+        )
+
+    # 7. Map formats to confirm alignment
+    MIME_MAP = {
+        "image/jpeg": ("JPEG", ".jpg"),
+        "image/png": ("PNG", ".png"),
+        "image/webp": ("WEBP", ".webp"),
+    }
+    expected_format, ext = MIME_MAP[mime_type]
+    # Check if PIL format matches
+    if img_format not in (expected_format, "MPO"):
+        if not (expected_format == "JPEG" and img_format == "MPO"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File content format ({img_format}) does not match MIME type ({mime_type}).",
+            )
+
+    # 8. Save image to local storage
+    file_like = io.BytesIO(contents)
+    storage_key = storage_service.save(file_like, ext)
+
+    # 9. Create ProductImage DB record
+    db_image = ProductImage(
+        product_id=product_id,
+        storage_key=storage_key,
+        image_type=img_type,
+        source_type=src_type,
+        original_filename=file.filename,
+        mime_type=mime_type,
+        width=width,
+        height=height,
+        file_size_bytes=file_size,
+        is_primary=False,
+        is_verified=False,
+    )
+    db.add(db_image)
+    db.commit()
+    db.refresh(db_image)
+    return db_image
+
+
+@router.get(
+    "/products/{product_id}/images/{image_id}/file",
+)
+def get_product_image_file(
+    product_id: uuid.UUID,
+    image_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """
+    Retrieve the actual image file from storage.
+    """
+    # 1. Verify product exists
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found.",
+        )
+
+    # 2. Verify image exists and belongs to the product
+    image = (
+        db.query(ProductImage)
+        .filter(ProductImage.id == image_id, ProductImage.product_id == product_id)
+        .first()
+    )
+    if not image:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Image with ID {image_id} belonging to product {product_id} not found.",
+        )
+
+    # 3. Retrieve file path and check existence
+    try:
+        file_path = storage_service.get_path(image.storage_key)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image file not found in storage.",
+        )
+
+    return FileResponse(path=str(file_path), media_type=image.mime_type)
