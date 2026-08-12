@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.products.models import ProductStatus
+from app.products.models import ProductStatus, IdentifierType
 
 
 class CategoryBase(BaseModel):
@@ -54,3 +54,23 @@ class ProductResponse(ProductBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProductIdentifierCreate(BaseModel):
+    identifier_type: str = Field(..., description="Identifier type (EAN, UPC, GTIN)")
+    value: str = Field(..., description="Barcode or GTIN identifier value")
+
+
+class ProductIdentifierResponse(BaseModel):
+    id: uuid.UUID
+    product_id: uuid.UUID
+    identifier_type: IdentifierType
+    value: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProductResolveQuery(BaseModel):
+    identifier_type: str = Field(..., description="Identifier type (EAN, UPC, GTIN)")
+    value: str = Field(..., description="Barcode or GTIN identifier value")
