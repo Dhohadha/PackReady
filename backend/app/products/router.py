@@ -4,19 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile,
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.core.database import get_db
-from app.core.storage import storage_service
-from app.products.models import (
-    Category,
-    Product,
-    ProductIdentifier,
-    IdentifierType,
-    ProductImage,
-    ProductSource,
-    ImageType,
-    SourceType,
-)
+from app.products.models import Category, Product, ProductIdentifier, ProductImage, ProductSource
 from app.products.schemas import (
     CategoryCreate,
     CategoryResponse,
@@ -29,6 +18,15 @@ from app.products.schemas import (
     ProductSourceCreate,
     ProductSourceResponse,
 )
+from app.products.repository import ProductRepository
+from app.products.service import ProductService
+from app.products.exceptions import (
+    CategoryNotFoundError,
+    ProductNotFoundError,
+    ImageNotFoundError,
+    StorageFileNotFoundError,
+)
+from app.products.resolver import ProductResolver
 
 router = APIRouter()
 
@@ -45,25 +43,17 @@ def create_category(
     Create a new product category.
     If parent_id is provided, validates that the parent category exists.
     """
-    if category_in.parent_id is not None:
-        parent = (
-            db.query(Category)
-            .filter(Category.id == category_in.parent_id)
-            .first()
+    try:
+        return ProductService.create_category(
+            db=db,
+            name=category_in.name,
+            parent_id=category_in.parent_id,
         )
-        if not parent:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Parent category with ID {category_in.parent_id} does not exist.",
-            )
-
-    db_category = Category(
-        name=category_in.name, parent_id=category_in.parent_id
-    )
-    db.add(db_category)
-    db.commit()
-    db.refresh(db_category)
-    return db_category
+    except CategoryNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.get("/categories/{category_id}", response_model=CategoryResponse)
@@ -73,7 +63,7 @@ def get_category(
     """
     Retrieve a category by its UUID.
     """
-    category = db.query(Category).filter(Category.id == category_id).first()
+    category = ProductRepository.get_category(db, category_id)
     if not category:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -94,46 +84,23 @@ def create_product(
     Create a new product.
     If category_id is provided, validates that the associated category exists.
     """
-    if product_in.category_id is not None:
-        category = (
-            db.query(Category)
-            .filter(Category.id == product_in.category_id)
-            .first()
+    try:
+        return ProductService.create_product(
+            db=db,
+            name=product_in.name,
+            brand=product_in.brand,
+            description=product_in.description,
+            category_id=product_in.category_id,
+            unit_value=product_in.unit_value,
+            unit_type=product_in.unit_type,
+            manufacturer=product_in.manufacturer,
+            status=product_in.status,
         )
-        if not category:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Category with ID {product_in.category_id} does not exist.",
-            )
-
-    db_product = Product(
-        name=product_in.name,
-        brand=product_in.brand,
-        description=product_in.description,
-        category_id=product_in.category_id,
-        unit_value=product_in.unit_value,
-        unit_type=product_in.unit_type,
-        manufacturer=product_in.manufacturer,
-        status=product_in.status,
-    )
-    db.add(db_product)
-    db.commit()
-    db.refresh(db_product)
-    return db_product
-
-
-def normalize_identifier_value(v: str) -> str:
-    if v is None:
-        raise ValueError("Identifier value cannot be null")
-    v_trimmed = v.strip()
-    if not v_trimmed:
-        raise ValueError("Identifier value cannot be empty")
-    normalized = "".join(c for c in v_trimmed if c not in (' ', '-', '.', '_', '\t'))
-    if not normalized:
-        raise ValueError("Identifier value must contain valid characters")
-    if not normalized.isdigit():
-        raise ValueError("Identifier value must contain only numeric digits")
-    return normalized
+    except CategoryNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.get("/products/resolve", response_model=ProductResponse)
@@ -145,40 +112,22 @@ def resolve_product(
     """
     Resolve a product by its identifier type and value.
     """
-    # 1. Validate identifier_type
     try:
-        id_type = IdentifierType(identifier_type.upper())
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid identifier type '{identifier_type}'. Must be one of EAN, UPC, GTIN.",
+        return ProductResolver.resolve_by_identifier(
+            db=db,
+            identifier_type=identifier_type,
+            value=value,
         )
-
-    # 2. Normalize value
-    try:
-        norm_value = normalize_identifier_value(value)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-
-    # 3. Query
-    db_identifier = (
-        db.query(ProductIdentifier)
-        .filter(
-            ProductIdentifier.identifier_type == id_type,
-            ProductIdentifier.value == norm_value,
-        )
-        .first()
-    )
-    if not db_identifier:
+    except ProductNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Product with identifier {id_type.value}:{norm_value} not found.",
+            detail=str(e),
         )
-
-    return db_identifier.product
 
 
 @router.post(
@@ -194,57 +143,23 @@ def create_product_identifier(
     """
     Create a new identifier for a product.
     """
-    # 1. Verify product exists
-    product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    try:
+        return ProductService.create_identifier(
+            db=db,
+            product_id=product_id,
+            identifier_type=identifier_in.identifier_type,
+            value=identifier_in.value,
+        )
+    except ProductNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Product with ID {product_id} not found.",
+            detail=str(e),
         )
-
-    # 2. Validate identifier_type
-    try:
-        id_type = IdentifierType(identifier_in.identifier_type.upper())
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid identifier type '{identifier_in.identifier_type}'. Must be one of EAN, UPC, GTIN.",
-        )
-
-    # 3. Normalize value
-    try:
-        norm_value = normalize_identifier_value(identifier_in.value)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-
-    # 4. Check for duplicate identifier
-    existing = (
-        db.query(ProductIdentifier)
-        .filter(
-            ProductIdentifier.identifier_type == id_type,
-            ProductIdentifier.value == norm_value,
-        )
-        .first()
-    )
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Duplicate identifier: this type and value combination already exists.",
-        )
-
-    # 5. Create identifier
-    db_identifier = ProductIdentifier(
-        product_id=product_id,
-        identifier_type=id_type,
-        value=norm_value,
-    )
-    db.add(db_identifier)
-    db.commit()
-    db.refresh(db_identifier)
-    return db_identifier
 
 
 @router.get(
@@ -258,14 +173,12 @@ def get_product_identifiers(
     """
     Retrieve all identifiers for a product.
     """
-    # Verify product exists
-    product = db.query(Product).filter(Product.id == product_id).first()
+    product = ProductRepository.get_product(db, product_id)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Product with ID {product_id} not found.",
         )
-
     return product.identifiers
 
 
@@ -274,7 +187,7 @@ def get_product(product_id: uuid.UUID, db: Session = Depends(get_db)) -> Product
     """
     Retrieve a product by its UUID.
     """
-    product = db.query(Product).filter(Product.id == product_id).first()
+    product = ProductRepository.get_product(db, product_id)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -296,50 +209,31 @@ def create_product_image(
     """
     Create metadata for a product image.
     """
-    # 1. Verify product exists
-    product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    try:
+        return ProductService.create_image_metadata(
+            db=db,
+            product_id=product_id,
+            storage_key=image_in.storage_key,
+            image_type=image_in.image_type,
+            source_type=image_in.source_type,
+            original_filename=image_in.original_filename,
+            mime_type=image_in.mime_type,
+            width=image_in.width,
+            height=image_in.height,
+            file_size_bytes=image_in.file_size_bytes,
+            is_primary=image_in.is_primary,
+            is_verified=image_in.is_verified,
+        )
+    except ProductNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Product with ID {product_id} not found.",
+            detail=str(e),
         )
-
-    # 2. Validate ImageType enum
-    try:
-        img_type = ImageType(image_in.image_type.upper())
-    except ValueError:
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid image type '{image_in.image_type}'.",
+            detail=str(e),
         )
-
-    # 3. Validate SourceType enum
-    try:
-        src_type = SourceType(image_in.source_type.upper())
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid source type '{image_in.source_type}'.",
-        )
-
-    # 4. Create ProductImage
-    db_image = ProductImage(
-        product_id=product_id,
-        storage_key=image_in.storage_key,
-        image_type=img_type,
-        source_type=src_type,
-        original_filename=image_in.original_filename,
-        mime_type=image_in.mime_type,
-        width=image_in.width,
-        height=image_in.height,
-        file_size_bytes=image_in.file_size_bytes,
-        is_primary=image_in.is_primary,
-        is_verified=image_in.is_verified,
-    )
-    db.add(db_image)
-    db.commit()
-    db.refresh(db_image)
-    return db_image
 
 
 @router.get(
@@ -353,14 +247,12 @@ def get_product_images(
     """
     Retrieve all image metadata for a product.
     """
-    # Verify product exists
-    product = db.query(Product).filter(Product.id == product_id).first()
+    product = ProductRepository.get_product(db, product_id)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Product with ID {product_id} not found.",
         )
-
     return product.images
 
 
@@ -377,38 +269,22 @@ def create_product_source(
     """
     Create metadata to record provenance of product information.
     """
-    # 1. Verify product exists
-    product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    try:
+        return ProductService.create_source(
+            db=db,
+            product_id=product_id,
+            source_in=source_in,
+        )
+    except ProductNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Product with ID {product_id} not found.",
+            detail=str(e),
         )
-
-    # 2. Validate SourceType enum
-    try:
-        src_type = SourceType(source_in.source_type.upper())
-    except ValueError:
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid source type '{source_in.source_type}'.",
+            detail=str(e),
         )
-
-    # 3. Create ProductSource
-    db_source = ProductSource(
-        product_id=product_id,
-        source_type=src_type,
-        source_name=source_in.source_name,
-        external_id=source_in.external_id,
-        source_url=source_in.source_url,
-    )
-    if source_in.retrieved_at is not None:
-        db_source.retrieved_at = source_in.retrieved_at
-
-    db.add(db_source)
-    db.commit()
-    db.refresh(db_source)
-    return db_source
 
 
 @router.get(
@@ -422,14 +298,12 @@ def get_product_sources(
     """
     Retrieve all sources (provenance metadata) for a product.
     """
-    # Verify product exists
-    product = db.query(Product).filter(Product.id == product_id).first()
+    product = ProductRepository.get_product(db, product_id)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Product with ID {product_id} not found.",
         )
-
     return product.sources
 
 
@@ -448,113 +322,24 @@ def upload_product_image(
     """
     Upload a product image, validate it, save it locally, and create metadata.
     """
-    # 1. Verify product exists
-    product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    try:
+        return ProductService.upload_image(
+            db=db,
+            product_id=product_id,
+            file=file,
+            image_type=image_type,
+            source_type=source_type,
+        )
+    except ProductNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Product with ID {product_id} not found.",
+            detail=str(e),
         )
-
-    # 2. Validate ImageType enum
-    try:
-        img_type = ImageType(image_type.upper())
-    except ValueError:
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid image type '{image_type}'.",
+            detail=str(e),
         )
-
-    # 3. Validate SourceType enum
-    try:
-        src_type = SourceType(source_type.upper())
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid source type '{source_type}'.",
-        )
-
-    # 4. Validate MIME Type
-    mime_type = file.content_type
-    if mime_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported MIME type '{mime_type}'. Supported types: image/jpeg, image/png, image/webp.",
-        )
-
-    # 5. Read file contents and validate file size
-    contents = file.file.read()
-    file_size = len(contents)
-    if file_size > settings.MAX_IMAGE_SIZE_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File size exceeds the limit of {settings.MAX_IMAGE_SIZE_BYTES} bytes.",
-        )
-    if file_size == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File cannot be empty.",
-        )
-
-    # 6. Verify image content using Pillow
-    import io
-    from PIL import Image, UnidentifiedImageError
-    try:
-        img = Image.open(io.BytesIO(contents))
-        img.verify()  # Verifies image is not corrupt
-        
-        # Re-open because verify() closes the file pointer in PIL
-        img = Image.open(io.BytesIO(contents))
-        width, height = img.size
-        img_format = img.format
-    except UnidentifiedImageError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file is not a valid image.",
-        )
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error processing image.",
-        )
-
-    # 7. Map formats to confirm alignment
-    MIME_MAP = {
-        "image/jpeg": ("JPEG", ".jpg"),
-        "image/png": ("PNG", ".png"),
-        "image/webp": ("WEBP", ".webp"),
-    }
-    expected_format, ext = MIME_MAP[mime_type]
-    # Check if PIL format matches
-    if img_format not in (expected_format, "MPO"):
-        if not (expected_format == "JPEG" and img_format == "MPO"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"File content format ({img_format}) does not match MIME type ({mime_type}).",
-            )
-
-    # 8. Save image to local storage
-    file_like = io.BytesIO(contents)
-    storage_key = storage_service.save(file_like, ext)
-
-    # 9. Create ProductImage DB record
-    db_image = ProductImage(
-        product_id=product_id,
-        storage_key=storage_key,
-        image_type=img_type,
-        source_type=src_type,
-        original_filename=file.filename,
-        mime_type=mime_type,
-        width=width,
-        height=height,
-        file_size_bytes=file_size,
-        is_primary=False,
-        is_verified=False,
-    )
-    db.add(db_image)
-    db.commit()
-    db.refresh(db_image)
-    return db_image
 
 
 @router.get(
@@ -568,39 +353,20 @@ def get_product_image_file(
     """
     Retrieve the actual image file from storage.
     """
-    # 1. Verify product exists
-    product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Product with ID {product_id} not found.",
-        )
-
-    # 2. Verify image exists and belongs to the product
-    image = (
-        db.query(ProductImage)
-        .filter(ProductImage.id == image_id, ProductImage.product_id == product_id)
-        .first()
-    )
-    if not image:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Image with ID {image_id} belonging to product {product_id} not found.",
-        )
-
-    # 3. Retrieve file path and check existence
     try:
-        file_path = storage_service.get_path(image.storage_key)
+        file_path, mime_type = ProductService.get_image_file_path(
+            db=db,
+            product_id=product_id,
+            image_id=image_id,
+        )
+        return FileResponse(path=file_path, media_type=mime_type)
+    except (ProductNotFoundError, ImageNotFoundError, StorageFileNotFoundError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Image file not found in storage.",
-        )
-
-    return FileResponse(path=str(file_path), media_type=image.mime_type)

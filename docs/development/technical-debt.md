@@ -1,2 +1,5 @@
 - Review Starlette/httpx TestClient deprecation warning.
 - Enforce at most one primary ProductImage per product.
+- float value for selling price to numeric values 
+- cascade(deleting)-> archieving products
+- same deleting -> deactivating for stores
