@@ -1,0 +1,2 @@
+- Review Starlette/httpx TestClient deprecation warning.
+- Enforce at most one primary ProductImage per product.

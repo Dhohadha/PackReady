@@ -4,7 +4,16 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.products.models import Category, Product, ProductIdentifier, IdentifierType
+from app.products.models import (
+    Category,
+    Product,
+    ProductIdentifier,
+    IdentifierType,
+    ProductImage,
+    ProductSource,
+    ImageType,
+    SourceType,
+)
 from app.products.schemas import (
     CategoryCreate,
     CategoryResponse,
@@ -12,6 +21,10 @@ from app.products.schemas import (
     ProductResponse,
     ProductIdentifierCreate,
     ProductIdentifierResponse,
+    ProductImageCreate,
+    ProductImageResponse,
+    ProductSourceCreate,
+    ProductSourceResponse,
 )
 
 router = APIRouter()
@@ -265,3 +278,153 @@ def get_product(product_id: uuid.UUID, db: Session = Depends(get_db)) -> Product
             detail=f"Product with ID {product_id} not found.",
         )
     return product
+
+
+@router.post(
+    "/products/{product_id}/images",
+    response_model=ProductImageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_product_image(
+    product_id: uuid.UUID,
+    image_in: ProductImageCreate,
+    db: Session = Depends(get_db),
+) -> ProductImage:
+    """
+    Create metadata for a product image.
+    """
+    # 1. Verify product exists
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found.",
+        )
+
+    # 2. Validate ImageType enum
+    try:
+        img_type = ImageType(image_in.image_type.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid image type '{image_in.image_type}'.",
+        )
+
+    # 3. Validate SourceType enum
+    try:
+        src_type = SourceType(image_in.source_type.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid source type '{image_in.source_type}'.",
+        )
+
+    # 4. Create ProductImage
+    db_image = ProductImage(
+        product_id=product_id,
+        storage_key=image_in.storage_key,
+        image_type=img_type,
+        source_type=src_type,
+        original_filename=image_in.original_filename,
+        mime_type=image_in.mime_type,
+        width=image_in.width,
+        height=image_in.height,
+        file_size_bytes=image_in.file_size_bytes,
+        is_primary=image_in.is_primary,
+        is_verified=image_in.is_verified,
+    )
+    db.add(db_image)
+    db.commit()
+    db.refresh(db_image)
+    return db_image
+
+
+@router.get(
+    "/products/{product_id}/images",
+    response_model=List[ProductImageResponse],
+)
+def get_product_images(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> List[ProductImage]:
+    """
+    Retrieve all image metadata for a product.
+    """
+    # Verify product exists
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found.",
+        )
+
+    return product.images
+
+
+@router.post(
+    "/products/{product_id}/sources",
+    response_model=ProductSourceResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_product_source(
+    product_id: uuid.UUID,
+    source_in: ProductSourceCreate,
+    db: Session = Depends(get_db),
+) -> ProductSource:
+    """
+    Create metadata to record provenance of product information.
+    """
+    # 1. Verify product exists
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found.",
+        )
+
+    # 2. Validate SourceType enum
+    try:
+        src_type = SourceType(source_in.source_type.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid source type '{source_in.source_type}'.",
+        )
+
+    # 3. Create ProductSource
+    db_source = ProductSource(
+        product_id=product_id,
+        source_type=src_type,
+        source_name=source_in.source_name,
+        external_id=source_in.external_id,
+        source_url=source_in.source_url,
+    )
+    if source_in.retrieved_at is not None:
+        db_source.retrieved_at = source_in.retrieved_at
+
+    db.add(db_source)
+    db.commit()
+    db.refresh(db_source)
+    return db_source
+
+
+@router.get(
+    "/products/{product_id}/sources",
+    response_model=List[ProductSourceResponse],
+)
+def get_product_sources(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> List[ProductSource]:
+    """
+    Retrieve all sources (provenance metadata) for a product.
+    """
+    # Verify product exists
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found.",
+        )
+
+    return product.sources
