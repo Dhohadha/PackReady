@@ -48,6 +48,14 @@ class ProductRepository:
         return db_product
 
     @staticmethod
+    def update_product(db: Session, db_product: Product, update_data: dict) -> Product:
+        for key, val in update_data.items():
+            setattr(db_product, key, val)
+        db.commit()
+        db.refresh(db_product)
+        return db_product
+
+    @staticmethod
     def get_identifier(db: Session, identifier_type: IdentifierType, value: str) -> Optional[ProductIdentifier]:
         return (
             db.query(ProductIdentifier)
@@ -90,6 +98,8 @@ class ProductRepository:
         is_primary: bool = False,
         is_verified: bool = False,
     ) -> ProductImage:
+        if is_primary:
+            ProductRepository.unset_primary_images(db, product_id)
         db_image = ProductImage(
             product_id=product_id,
             storage_key=storage_key,
@@ -117,6 +127,21 @@ class ProductRepository:
         )
 
     @staticmethod
+    def get_source(
+        db: Session,
+        product_id: uuid.UUID,
+        source_name: str,
+        external_id: Optional[str] = None,
+    ) -> Optional[ProductSource]:
+        query = db.query(ProductSource).filter(
+            ProductSource.product_id == product_id,
+            ProductSource.source_name == source_name,
+        )
+        if external_id is not None:
+            query = query.filter(ProductSource.external_id == external_id)
+        return query.first()
+
+    @staticmethod
     def create_source(
         db: Session,
         product_id: uuid.UUID,
@@ -126,6 +151,10 @@ class ProductRepository:
         source_url: Optional[str] = None,
         retrieved_at = None,
     ) -> ProductSource:
+        existing = ProductRepository.get_source(db, product_id, source_name, external_id)
+        if existing:
+            return existing
+
         db_source = ProductSource(
             product_id=product_id,
             source_type=source_type,
@@ -140,3 +169,16 @@ class ProductRepository:
         db.commit()
         db.refresh(db_source)
         return db_source
+
+    @staticmethod
+    def delete_image(db: Session, db_image: ProductImage) -> None:
+        db.delete(db_image)
+        db.commit()
+
+    @staticmethod
+    def unset_primary_images(db: Session, product_id: uuid.UUID) -> None:
+        db.query(ProductImage).filter(
+            ProductImage.product_id == product_id,
+            ProductImage.is_primary == True,
+        ).update({"is_primary": False})
+        db.commit()

@@ -215,3 +215,124 @@ def test_missing_storage_file_returns_404(db_session: Session) -> None:
     # 3. Retrieve
     retrieve_resp = client.get(f"/products/{prod_id}/images/{img_data['id']}/file")
     assert retrieve_resp.status_code == 404
+
+
+def test_multiple_images_for_one_product(db_session: Session) -> None:
+    prod_id = client.post("/products", json={"name": "Multi Image Product"}).json()["id"]
+
+    img_bytes1 = create_mock_image_bytes("JPEG")
+    files1 = {"file": ("img1.jpg", img_bytes1, "image/jpeg")}
+    data1 = {"image_type": "REFERENCE", "source_type": "PACKREADY"}
+    resp1 = client.post(f"/products/{prod_id}/images/upload", files=files1, data=data1)
+    assert resp1.status_code == 201
+
+    img_bytes2 = create_mock_image_bytes("PNG")
+    files2 = {"file": ("img2.png", img_bytes2, "image/png")}
+    data2 = {"image_type": "MERCHANT", "source_type": "MERCHANT"}
+    resp2 = client.post(f"/products/{prod_id}/images/upload", files=files2, data=data2)
+    assert resp2.status_code == 201
+
+    list_resp = client.get(f"/products/{prod_id}/images")
+    assert list_resp.status_code == 200
+    images = list_resp.json()
+    assert len(images) == 2
+    assert {images[0]["original_filename"], images[1]["original_filename"]} == {"img1.jpg", "img2.png"}
+
+
+def test_delete_product_image_successfully(db_session: Session) -> None:
+    prod_id = client.post("/products", json={"name": "Product for delete"}).json()["id"]
+    img_bytes = create_mock_image_bytes("JPEG")
+    files = {"file": ("img.jpg", img_bytes, "image/jpeg")}
+    data = {"image_type": "REFERENCE", "source_type": "PACKREADY"}
+    img_data = client.post(f"/products/{prod_id}/images/upload", files=files, data=data).json()
+    image_id = img_data["id"]
+
+    file_path = storage_service.get_path(img_data["storage_key"])
+    assert file_path.exists()
+
+    del_resp = client.delete(f"/products/{prod_id}/images/{image_id}")
+    assert del_resp.status_code == 204
+
+    assert not file_path.exists()
+
+    list_resp = client.get(f"/products/{prod_id}/images")
+    assert len(list_resp.json()) == 0
+
+
+def test_cannot_delete_image_belonging_to_another_product(db_session: Session) -> None:
+    p1 = client.post("/products", json={"name": "Product 1"}).json()["id"]
+    p2 = client.post("/products", json={"name": "Product 2"}).json()["id"]
+    img_bytes = create_mock_image_bytes("JPEG")
+    files = {"file": ("img.jpg", img_bytes, "image/jpeg")}
+    data = {"image_type": "REFERENCE", "source_type": "PACKREADY"}
+    img_data = client.post(f"/products/{p1}/images/upload", files=files, data=data).json()
+    image_id = img_data["id"]
+
+    del_resp = client.delete(f"/products/{p2}/images/{image_id}")
+    assert del_resp.status_code == 404
+
+
+def test_delete_missing_physical_file_safely(db_session: Session) -> None:
+    prod_id = client.post("/products", json={"name": "Product missing file"}).json()["id"]
+    img_bytes = create_mock_image_bytes("JPEG")
+    files = {"file": ("img.jpg", img_bytes, "image/jpeg")}
+    data = {"image_type": "REFERENCE", "source_type": "PACKREADY"}
+    img_data = client.post(f"/products/{prod_id}/images/upload", files=files, data=data).json()
+    image_id = img_data["id"]
+
+    file_path = storage_service.get_path(img_data["storage_key"])
+    assert file_path.exists()
+    file_path.unlink()
+
+    del_resp = client.delete(f"/products/{prod_id}/images/{image_id}")
+    assert del_resp.status_code == 204
+
+
+def test_primary_image_exclusivity(db_session: Session) -> None:
+    prod_id = client.post("/products", json={"name": "Primary Image Product"}).json()["id"]
+
+    resp1 = client.post(
+        f"/products/{prod_id}/images",
+        json={
+            "storage_key": "images/test1.jpg",
+            "image_type": "REFERENCE",
+            "source_type": "PACKREADY",
+            "mime_type": "image/jpeg",
+            "is_primary": True,
+        },
+    )
+    assert resp1.status_code == 201
+    assert resp1.json()["is_primary"] is True
+    id1 = resp1.json()["id"]
+
+    resp2 = client.post(
+        f"/products/{prod_id}/images",
+        json={
+            "storage_key": "images/test2.jpg",
+            "image_type": "MERCHANT",
+            "source_type": "MERCHANT",
+            "mime_type": "image/jpeg",
+            "is_primary": True,
+        },
+    )
+    assert resp2.status_code == 201
+    assert resp2.json()["is_primary"] is True
+    id2 = resp2.json()["id"]
+
+    list_resp = client.get(f"/products/{prod_id}/images").json()
+    img1 = next(x for x in list_resp if x["id"] == id1)
+    img2 = next(x for x in list_resp if x["id"] == id2)
+
+    assert img1["is_primary"] is False
+    assert img2["is_primary"] is True
+
+    patch_resp = client.patch(f"/products/{prod_id}/images/{id1}/primary")
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["is_primary"] is True
+
+    list_resp_updated = client.get(f"/products/{prod_id}/images").json()
+    img1_up = next(x for x in list_resp_updated if x["id"] == id1)
+    img2_up = next(x for x in list_resp_updated if x["id"] == id2)
+
+    assert img1_up["is_primary"] is True
+    assert img2_up["is_primary"] is False

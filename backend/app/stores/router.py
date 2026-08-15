@@ -10,11 +10,13 @@ from app.stores.schemas import (
     StoreResponse,
     StoreProductCreate,
     StoreProductResponse,
+    StoreProductResolutionResponse,
 )
 from app.stores.repository import StoreRepository
 from app.stores.service import StoreService
 from app.stores.exceptions import StoreNotFoundError, StoreProductNotFoundError
 from app.products.exceptions import ProductNotFoundError
+from app.stores.resolver import StoreProductResolver
 
 router = APIRouter()
 
@@ -37,18 +39,18 @@ def create_store(store_in: StoreCreate, db: Session = Depends(get_db)) -> Store:
         )
 
 
-@router.get("/stores/{store_id}", response_model=StoreResponse)
-def get_store(store_id: uuid.UUID, db: Session = Depends(get_db)) -> Store:
+@router.get(
+    "/stores/{store_id}",
+    response_model=StoreResponse,
+)
+def get_store(
+    store_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> Store:
     """
-    Retrieve a store by ID.
+    Retrieve a store by ID (auto-creating if not yet created).
     """
-    store = StoreRepository.get_store(db, store_id)
-    if not store:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Store with ID {store_id} not found.",
-        )
-    return store
+    return StoreRepository.get_or_create_store(db, store_id)
 
 
 @router.post(
@@ -94,15 +96,55 @@ def get_store_products(
     db: Session = Depends(get_db),
 ) -> List[StoreProduct]:
     """
-    List all products mapped to a store.
+    List all products mapped to a store (auto-creating store if not yet created).
     """
-    store = StoreRepository.get_store(db, store_id)
-    if not store:
+    StoreRepository.get_or_create_store(db, store_id)
+    return StoreRepository.get_store_products(db, store_id)
+
+
+@router.get(
+    "/stores/{store_id}/products/resolve",
+    response_model=StoreProductResolutionResponse,
+)
+def resolve_store_product(
+    store_id: uuid.UUID,
+    identifier_type: str,
+    value: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Resolve store-level product and inventory by barcode identifier.
+    """
+    try:
+        product_found, sp_found, inv_found, product, sp, inv = StoreProductResolver.resolve_store_product(
+            db=db,
+            store_id=store_id,
+            identifier_type=identifier_type,
+            value=value,
+        )
+        return {
+            "product_found": product_found,
+            "store_product_found": sp_found,
+            "inventory_found": inv_found,
+            "product": product,
+            "store_product": sp,
+            "inventory": inv,
+        }
+    except StoreNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Store with ID {store_id} not found.",
+            detail=str(e),
         )
-    return StoreRepository.get_store_products(db, store_id)
+    except ProductNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.get(

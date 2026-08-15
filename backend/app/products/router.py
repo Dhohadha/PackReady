@@ -10,6 +10,7 @@ from app.products.schemas import (
     CategoryCreate,
     CategoryResponse,
     ProductCreate,
+    ProductUpdate,
     ProductResponse,
     ProductIdentifierCreate,
     ProductIdentifierResponse,
@@ -17,9 +18,12 @@ from app.products.schemas import (
     ProductImageResponse,
     ProductSourceCreate,
     ProductSourceResponse,
+    ProductReferenceImageImport,
+    ProductCompletenessResponse,
 )
 from app.products.repository import ProductRepository
 from app.products.service import ProductService
+from app.products.knowledge_service import ProductKnowledgeService
 from app.products.exceptions import (
     CategoryNotFoundError,
     ProductNotFoundError,
@@ -196,6 +200,26 @@ def get_product(product_id: uuid.UUID, db: Session = Depends(get_db)) -> Product
     return product
 
 
+@router.patch("/products/{product_id}", response_model=ProductResponse)
+def update_product(
+    product_id: uuid.UUID,
+    product_in: ProductUpdate,
+    db: Session = Depends(get_db),
+) -> Product:
+    """
+    Partially update an existing product.
+    Only fields explicitly sent in the payload are modified.
+    """
+    try:
+        update_data = product_in.model_dump(exclude_unset=True)
+        return ProductService.update_product(db, product_id, update_data)
+    except (ProductNotFoundError, CategoryNotFoundError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if isinstance(e, ProductNotFoundError) else status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
 @router.post(
     "/products/{product_id}/images",
     response_model=ProductImageResponse,
@@ -368,5 +392,148 @@ def get_product_image_file(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.delete("/products/{product_id}/images/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_product_image(
+    product_id: uuid.UUID,
+    image_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> None:
+    """
+    Delete a product image file and its metadata.
+    """
+    try:
+        ProductService.delete_image(db, product_id, image_id)
+    except (ProductNotFoundError, ImageNotFoundError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+
+@router.patch("/products/{product_id}/images/{image_id}/primary", response_model=ProductImageResponse)
+def set_primary_product_image(
+    product_id: uuid.UUID,
+    image_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> ProductImage:
+    """
+    Set an image as primary for a product, unsetting the previous primary image.
+    """
+    try:
+        return ProductService.set_primary_image(db, product_id, image_id)
+    except (ProductNotFoundError, ImageNotFoundError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+
+@router.get("/products/{product_id}/completeness", response_model=ProductCompletenessResponse)
+def get_product_completeness(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Get completeness metrics for a product.
+    """
+    try:
+        return ProductKnowledgeService.calculate_completeness(db, product_id)
+    except ProductNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+
+@router.patch("/products/{product_id}/images/{image_id}/training", response_model=ProductImageResponse)
+def designate_training_image(
+    product_id: uuid.UUID,
+    image_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> ProductImage:
+    """
+    Explicitly designate a product image as verified and training-eligible for ML dataset.
+    """
+    try:
+        return ProductKnowledgeService.designate_training_image(db, product_id, image_id)
+    except (ProductNotFoundError, ImageNotFoundError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+
+@router.post(
+    "/products/{product_id}/images/import-reference",
+    response_model=ProductImageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_reference_product_image(
+    product_id: uuid.UUID,
+    import_in: ProductReferenceImageImport,
+    db: Session = Depends(get_db),
+) -> ProductImage:
+    """
+    Import an external reference image from a verified Product Knowledge lookup provider.
+    """
+    try:
+        return await ProductService.import_reference_image(
+            db=db,
+            product_id=product_id,
+            image_url=import_in.image_url,
+            provider_name=import_in.provider_name,
+        )
+    except ProductNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.get("/products/{product_id}/images/{image_id}/quality")
+def get_image_quality_analysis(
+    product_id: uuid.UUID,
+    image_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Get advisory objective image quality analysis (dimensions, brightness, blur score, quality status).
+    """
+    try:
+        file_path, _ = ProductService.get_image_file_path(db, product_id, image_id)
+        from app.products.quality_service import ImageQualityService
+        with open(file_path, "rb") as f:
+            contents = f.read()
+        return ImageQualityService.analyze_image_bytes(contents)
+    except (ProductNotFoundError, ImageNotFoundError, StorageFileNotFoundError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+
+@router.get("/products/{product_id}/images/duplicates")
+def get_product_image_duplicates(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Detect duplicate images for a product using SHA-256 and perceptual hashing.
+    """
+    try:
+        from app.products.deduplication_service import ImageDeduplicationService
+        return ImageDeduplicationService.find_duplicates_for_product(db, product_id)
+    except ProductNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e),
         )

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.products.models import ProductStatus, IdentifierType, ImageType, SourceType
@@ -46,6 +46,25 @@ class ProductBase(BaseModel):
 
 class ProductCreate(ProductBase):
     pass
+
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, description="Product name")
+    brand: Optional[str] = Field(None, description="Product brand name")
+    description: Optional[str] = Field(None, description="Product description")
+    category_id: Optional[uuid.UUID] = Field(
+        None, description="Associated Category UUID"
+    )
+    unit_value: Optional[float] = Field(
+        None, description="Value per unit (e.g. 500)"
+    )
+    unit_type: Optional[str] = Field(
+        None, description="Type of unit (e.g. ml, g, pcs)"
+    )
+    manufacturer: Optional[str] = Field(None, description="Manufacturer name")
+    status: Optional[ProductStatus] = Field(
+        None, description="Product lifecycle status"
+    )
 
 
 class ProductResponse(ProductBase):
@@ -128,3 +147,22 @@ class ProductSourceResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProductReferenceImageImport(BaseModel):
+    image_url: str = Field(..., min_length=1, description="External image URL from provider candidate")
+    provider_name: str = Field("External Database", min_length=1, description="Provider name")
+
+
+class ProductCompletenessResponse(BaseModel):
+    product_id: uuid.UUID
+    completeness_score: int
+    is_complete: bool
+    has_name: bool
+    has_brand: bool
+    has_category: bool
+    has_identifiers: bool
+    has_images: bool
+    has_primary_image: bool
+    has_unit_info: bool
+    missing_fields: List[str]

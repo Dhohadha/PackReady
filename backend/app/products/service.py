@@ -1,6 +1,8 @@
 import io
+import logging
 import uuid
 from typing import Optional
+import httpx
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 from PIL import Image, UnidentifiedImageError
@@ -11,6 +13,9 @@ from app.products.models import Category, Product, ProductIdentifier, ProductIma
 from app.products.repository import ProductRepository
 from app.products.exceptions import ProductNotFoundError, CategoryNotFoundError, ImageNotFoundError, StorageFileNotFoundError
 from app.products.resolver import normalize_identifier_value
+
+logger = logging.getLogger(__name__)
+
 
 class ProductService:
     @staticmethod
@@ -40,6 +45,20 @@ class ProductService:
         return ProductRepository.create_product(
             db, name, brand, description, category_id, unit_value, unit_type, manufacturer, status
         )
+
+    @staticmethod
+    def update_product(db: Session, product_id: uuid.UUID, update_data: dict) -> Product:
+        db_product = ProductRepository.get_product(db, product_id)
+        if not db_product:
+            raise ProductNotFoundError(f"Product with ID {product_id} not found.")
+
+        # Business validation: validate category_id if present
+        if "category_id" in update_data and update_data["category_id"] is not None:
+            category = ProductRepository.get_category(db, update_data["category_id"])
+            if not category:
+                raise CategoryNotFoundError(f"Category with ID {update_data['category_id']} does not exist.")
+
+        return ProductRepository.update_product(db, db_product, update_data)
 
     @staticmethod
     def create_identifier(
@@ -240,6 +259,52 @@ class ProductService:
         return str(file_path), image.mime_type
 
     @staticmethod
+    def delete_image(db: Session, product_id: uuid.UUID, image_id: uuid.UUID) -> None:
+        # 1. Verify product exists
+        product = ProductRepository.get_product(db, product_id)
+        if not product:
+            raise ProductNotFoundError(f"Product with ID {product_id} not found.")
+
+        # 2. Verify image exists and belongs to product
+        image = ProductRepository.get_image(db, product_id, image_id)
+        if not image:
+            raise ImageNotFoundError(
+                f"Image with ID {image_id} belonging to product {product_id} not found."
+            )
+
+        # 3. Delete physical file
+        try:
+            storage_service.delete(image.storage_key)
+        except Exception:
+            pass
+
+        # 4. Delete DB record
+        ProductRepository.delete_image(db, image)
+
+    @staticmethod
+    def set_primary_image(db: Session, product_id: uuid.UUID, image_id: uuid.UUID) -> ProductImage:
+        # 1. Verify product exists
+        product = ProductRepository.get_product(db, product_id)
+        if not product:
+            raise ProductNotFoundError(f"Product with ID {product_id} not found.")
+
+        # 2. Verify image exists and belongs to product
+        image = ProductRepository.get_image(db, product_id, image_id)
+        if not image:
+            raise ImageNotFoundError(
+                f"Image with ID {image_id} belonging to product {product_id} not found."
+            )
+
+        # 3. Unset existing primary image
+        ProductRepository.unset_primary_images(db, product_id)
+
+        # 4. Set this image as primary
+        image.is_primary = True
+        db.commit()
+        db.refresh(image)
+        return image
+
+    @staticmethod
     def create_source(
         db: Session,
         product_id: uuid.UUID,
@@ -265,3 +330,75 @@ class ProductService:
             source_url=source_in.source_url,
             retrieved_at=source_in.retrieved_at,
         )
+
+    @staticmethod
+    async def import_reference_image(
+        db: Session,
+        product_id: uuid.UUID,
+        image_url: str,
+        provider_name: str = "External Database",
+    ) -> ProductImage:
+        product = ProductRepository.get_product(db, product_id)
+        if not product:
+            raise ProductNotFoundError(f"Product with ID {product_id} not found.")
+
+        if not (image_url.startswith("http://") or image_url.startswith("https://")):
+            raise ValueError("Invalid image URL scheme. Only HTTP and HTTPS URLs are permitted.")
+
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(image_url)
+
+            if resp.status_code != 200:
+                raise ValueError(f"Failed to download image from provider. HTTP status: {resp.status_code}")
+
+            contents = resp.content
+            file_size = len(contents)
+            if file_size > MAX_FILE_SIZE:
+                raise ValueError("Downloaded image file size exceeds the limit.")
+            if file_size == 0:
+                raise ValueError("Downloaded image is empty.")
+
+            img = Image.open(io.BytesIO(contents))
+            img.verify()
+            img = Image.open(io.BytesIO(contents))
+            width, height = img.size
+            img_format = img.format
+
+            FORMAT_MAP = {
+                "JPEG": ("image/jpeg", ".jpg"),
+                "PNG": ("image/png", ".png"),
+                "WEBP": ("image/webp", ".webp"),
+                "MPO": ("image/jpeg", ".jpg"),
+            }
+            if img_format not in FORMAT_MAP:
+                raise ValueError(f"Unsupported image format '{img_format}'.")
+
+            mime_type, ext = FORMAT_MAP[img_format]
+            file_like = io.BytesIO(contents)
+            storage_key = storage_service.save(file_like, ext)
+
+            has_primary = any(i.is_primary for i in product.images)
+            is_primary = not has_primary
+
+            safe_provider = provider_name.lower().replace(" ", "_")
+            original_filename = f"reference_{safe_provider}{ext}"
+
+            return ProductRepository.create_image(
+                db=db,
+                product_id=product_id,
+                storage_key=storage_key,
+                image_type=ImageType.REFERENCE,
+                source_type=SourceType.EXTERNAL_DATABASE,
+                original_filename=original_filename,
+                mime_type=mime_type,
+                width=width,
+                height=height,
+                file_size_bytes=file_size,
+                is_primary=is_primary,
+                is_verified=False,
+            )
+        except Exception as e:
+            logger.warning(f"Reference image import failed for product {product_id}: {e}")
+            raise ValueError(f"Reference image import failed: {e}")

@@ -37,3 +37,38 @@ class StoreProductResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ResolvedProductInfo(BaseModel):
+    id: uuid.UUID
+    name: str
+    brand: Optional[str]
+    category_id: Optional[uuid.UUID]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResolvedStoreProductInfo(BaseModel):
+    id: uuid.UUID
+    selling_price: float
+    is_available: bool
+    marketplace_enabled: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResolvedInventoryInfo(BaseModel):
+    id: uuid.UUID
+    quantity: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StoreProductResolutionResponse(BaseModel):
+    product_found: bool
+    store_product_found: bool
+    inventory_found: bool
+    product: Optional[ResolvedProductInfo] = None
+    store_product: Optional[ResolvedStoreProductInfo] = None
+    inventory: Optional[ResolvedInventoryInfo] = None
+

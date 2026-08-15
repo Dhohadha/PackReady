@@ -214,3 +214,96 @@ def test_get_product_not_found() -> None:
     fake_id = str(uuid.uuid4())
     response = client.get(f"/products/{fake_id}")
     assert response.status_code == 404
+
+
+def test_update_product_partial_name(db_session: Session) -> None:
+    prod = Product(name="Jeans", brand="Levis", description="Blue denim")
+    db_session.add(prod)
+    db_session.commit()
+    db_session.refresh(prod)
+
+    response = client.patch(f"/products/{prod.id}", json={"name": "Black Jeans"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "Black Jeans"
+    assert data["brand"] == "Levis"
+    assert data["description"] == "Blue denim"
+
+
+def test_update_product_partial_brand(db_session: Session) -> None:
+    prod = Product(name="Jeans", brand="Levis", description="Blue denim")
+    db_session.add(prod)
+    db_session.commit()
+    db_session.refresh(prod)
+
+    response = client.patch(f"/products/{prod.id}", json={"brand": "Wrangler"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "Jeans"
+    assert data["brand"] == "Wrangler"
+    assert data["description"] == "Blue denim"
+
+
+def test_update_product_partial_description(db_session: Session) -> None:
+    prod = Product(name="Jeans", brand="Levis", description="Blue denim")
+    db_session.add(prod)
+    db_session.commit()
+    db_session.refresh(prod)
+
+    response = client.patch(f"/products/{prod.id}", json={"description": None})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "Jeans"
+    assert data["brand"] == "Levis"
+    assert data["description"] is None
+
+
+def test_update_product_partial_unit(db_session: Session) -> None:
+    prod = Product(name="Jeans", unit_value=32.0, unit_type="inch")
+    db_session.add(prod)
+    db_session.commit()
+    db_session.refresh(prod)
+
+    response = client.patch(f"/products/{prod.id}", json={"unit_value": 34.0})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["unit_value"] == 34.0
+    assert data["unit_type"] == "inch"
+
+
+def test_update_product_multiple_fields(db_session: Session) -> None:
+    prod = Product(name="Jeans", brand="Levis", description="Blue denim")
+    db_session.add(prod)
+    db_session.commit()
+    db_session.refresh(prod)
+
+    response = client.patch(
+        f"/products/{prod.id}",
+        json={"name": "Red Jeans", "brand": "Lee", "description": "Classic fit"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "Red Jeans"
+    assert data["brand"] == "Lee"
+    assert data["description"] == "Classic fit"
+
+
+def test_update_product_invalid_id() -> None:
+    response = client.patch("/products/not-a-uuid", json={"name": "Invalid"})
+    assert response.status_code == 422
+
+
+def test_update_product_nonexistent() -> None:
+    fake_id = str(uuid.uuid4())
+    response = client.patch(f"/products/{fake_id}", json={"name": "Nonexistent"})
+    assert response.status_code == 404
+
+
+def test_update_product_validation_failure(db_session: Session) -> None:
+    prod = Product(name="Jeans")
+    db_session.add(prod)
+    db_session.commit()
+    db_session.refresh(prod)
+
+    response = client.patch(f"/products/{prod.id}", json={"name": ""})
+    assert response.status_code == 422

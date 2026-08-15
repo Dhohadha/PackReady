@@ -9,6 +9,16 @@ class StoreRepository:
         return db.query(Store).filter(Store.id == store_id).first()
 
     @staticmethod
+    def get_or_create_store(db: Session, store_id: uuid.UUID, name: str = "PackReady Store") -> Store:
+        store = db.query(Store).filter(Store.id == store_id).first()
+        if not store:
+            store = Store(id=store_id, name=name, status=StoreStatus.ACTIVE)
+            db.add(store)
+            db.commit()
+            db.refresh(store)
+        return store
+
+    @staticmethod
     def create_store(db: Session, name: str, status: StoreStatus = StoreStatus.ACTIVE) -> Store:
         db_store = Store(name=name, status=status)
         db.add(db_store)
